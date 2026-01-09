@@ -42,6 +42,59 @@ function parseEnvContent(content: string): Map<string, string> {
   }
   return out;
 }
+
+function isValidEnvKey(key: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(key);
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function formatEnvAssignment(key: string, value: string): string {
+  // Keep it simple and readable; quote only when needed.
+  const needsQuotes = /[\s#"']/g.test(value) || value.includes("\\");
+  if (!needsQuotes) return `${key}=${value}`;
+  const escaped = value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  return `${key}="${escaped}"`;
+}
+
+function deleteEnvVarFromContent(content: string, key: string): string {
+  const re = new RegExp(`^(?:export\\s+)?${escapeRegExp(key)}\\s*=`);
+  const lines = content.split(/\r?\n/);
+  const next = lines.filter((raw) => {
+    const line = raw.trim();
+    if (!line) return true;
+    if (line.startsWith("#")) return true;
+    return !re.test(line);
+  });
+  // Avoid trailing blank lines explosion.
+  return next.join("\n").replace(/\s+$/, "");
+}
+
+function upsertEnvVarInContent(content: string, key: string, value: string): string {
+  const re = new RegExp(`^(?:export\\s+)?${escapeRegExp(key)}\\s*=`);
+  const lines = content.split(/\r?\n/);
+  const out: string[] = [];
+  let inserted = false;
+  for (const raw of lines) {
+    const trimmed = raw.trim();
+    if (trimmed && !trimmed.startsWith("#") && re.test(trimmed)) {
+      if (!inserted) {
+        out.push(formatEnvAssignment(key, value));
+        inserted = true;
+      }
+      // drop duplicate occurrences
+      continue;
+    }
+    out.push(raw);
+  }
+  if (!inserted) {
+    if (out.length && out[out.length - 1]?.trim() !== "") out.push("");
+    out.push(formatEnvAssignment(key, value));
+  }
+  return out.join("\n").replace(/\s+$/, "");
+}
 type IntegrationInfo = {
   config_dir: string;
   ev_dir: string;
@@ -92,6 +145,9 @@ function App() {
   const [isDirty, setIsDirty] = useState(false);
   const [groupEditMode, setGroupEditMode] = useState(false);
   const [groupFilter, setGroupFilter] = useState("");
+  const [editingEnvKey, setEditingEnvKey] = useState<string | null>(null);
+  const [editingKey, setEditingKey] = useState("");
+  const [editingValue, setEditingValue] = useState("");
   const [saveHint, setSaveHint] = useState<string | null>(null);
   const saveHintTimer = useRef<number | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
@@ -424,6 +480,9 @@ function App() {
       setIsDirty(false);
       setGroupEditMode(false);
       setGroupFilter("");
+      setEditingEnvKey(null);
+      setEditingKey("");
+      setEditingValue("");
       return;
     }
     const g = groups.find((x) => x.id === selectedGroupId);
@@ -431,6 +490,9 @@ function App() {
     setIsDirty(false);
     setGroupEditMode(false);
     setGroupFilter("");
+    setEditingEnvKey(null);
+    setEditingKey("");
+    setEditingValue("");
   }, [groups, selectedGroupId]);
 
   const selectedCustomGroup = useMemo(() => {
@@ -448,7 +510,7 @@ function App() {
     return list.filter((v) => v.key.toLowerCase().includes(q));
   }, [draftContent, groupFilter, selectedCustomGroup]);
 
-  async function saveSelectedGroup() {
+  async function saveSelectedGroupContent(nextContent: string) {
     if (selectedGroupId === "current") return;
     const idx = groups.findIndex((g) => g.id === selectedGroupId);
     if (idx < 0) return;
@@ -456,7 +518,7 @@ function App() {
     const next = [...groups];
     next[idx] = {
       ...next[idx],
-      content: draftContent,
+      content: nextContent,
       updatedAt: Date.now(),
     };
     setGroups(next);
@@ -468,6 +530,10 @@ function App() {
     }
     setSaveHint(t("savedHint"));
     saveHintTimer.current = window.setTimeout(() => setSaveHint(null), 1200);
+  }
+
+  async function saveSelectedGroup() {
+    await saveSelectedGroupContent(draftContent);
   }
 
   async function saveAndApplySelectedGroup() {
@@ -592,6 +658,46 @@ function App() {
     } finally {
       if (saveHintTimer.current != null) window.clearTimeout(saveHintTimer.current);
       saveHintTimer.current = window.setTimeout(() => setSaveHint(null), 900);
+    }
+  }
+
+  async function saveInlineEnvVar(prevKey: string | null, nextKeyRaw: string, nextValue: string) {
+    if (!selectedCustomGroup) return;
+    const nextKey = nextKeyRaw.trim();
+    if (!isValidEnvKey(nextKey)) {
+      setSaveHint(`${t("error")}: ${t("invalidEnvKey")}`);
+      return;
+    }
+    // Prevent duplicate keys (except when keeping the same key).
+    const existing = parseEnvContent(draftContent);
+    if (prevKey !== nextKey && existing.has(nextKey)) {
+      setSaveHint(`${t("error")}: ${t("duplicateEnvKey")}`);
+      return;
+    }
+
+    let nextContent = draftContent;
+    if (prevKey && prevKey !== nextKey) {
+      nextContent = deleteEnvVarFromContent(nextContent, prevKey);
+    }
+    nextContent = upsertEnvVarInContent(nextContent, nextKey, nextValue);
+    setDraftContent(nextContent);
+    setIsDirty(true);
+    await saveSelectedGroupContent(nextContent);
+    setEditingEnvKey(null);
+    setEditingKey("");
+    setEditingValue("");
+  }
+
+  async function deleteInlineEnvVar(key: string) {
+    if (!selectedCustomGroup) return;
+    const nextContent = deleteEnvVarFromContent(draftContent, key);
+    setDraftContent(nextContent);
+    setIsDirty(true);
+    await saveSelectedGroupContent(nextContent);
+    if (editingEnvKey === key) {
+      setEditingEnvKey(null);
+      setEditingKey("");
+      setEditingValue("");
     }
   }
 
@@ -1083,12 +1189,26 @@ function App() {
                         <button
                           className="btn ghost"
                           type="button"
-                          onClick={() => setGroupEditMode(true)}
-                          title={t("edit")}
-                          aria-label={t("edit")}
+                          onClick={() => {
+                            setEditingEnvKey("__new__");
+                            setEditingKey("");
+                            setEditingValue("");
+                          }}
+                          title={t("addVar")}
+                          aria-label={t("addVar")}
                         >
-                          <Pencil size={16} />
-                          <span>{t("edit")}</span>
+                          <Plus size={16} />
+                          <span>{t("addVar")}</span>
+                        </button>
+                        <button
+                          className="btn ghost"
+                          type="button"
+                          onClick={() => setGroupEditMode(true)}
+                          title={t("batchEdit")}
+                          aria-label={t("batchEdit")}
+                        >
+                          <Code size={16} />
+                          <span>{t("batchEdit")}</span>
                         </button>
                       </div>
                       <div className="current-actions">
@@ -1120,30 +1240,126 @@ function App() {
                       </div>
                     </div>
 
-                    {selectedGroupVars.length ? (
+                    {selectedGroupVars.length || editingEnvKey === "__new__" ? (
                       <div className="env-list" role="list">
-                        {selectedGroupVars.slice(0, 500).map((v) => (
-                          <div key={v.key} className="env-item" role="listitem">
-                            <div className="env-key" title={v.key}>
-                              <span className="env-key-text">{v.key}</span>
+                        {editingEnvKey === "__new__" ? (
+                          <div key="__new__" className="env-item is-editing" role="listitem">
+                            <div className="env-key">
+                              <input
+                                className="env-edit-input mono"
+                                value={editingKey}
+                                onChange={(e) => setEditingKey(e.currentTarget.value)}
+                                placeholder="KEY"
+                                autoFocus
+                              />
                             </div>
-                            <div className="env-value" title={showValues ? v.value : ""}>
-                              {showValues ? v.value : "••••••"}
+                            <div className="env-value">
+                              <input
+                                className="env-edit-input mono"
+                                value={editingValue}
+                                onChange={(e) => setEditingValue(e.currentTarget.value)}
+                                placeholder="VALUE"
+                              />
                             </div>
                             <div className="env-actions">
-                              <button className={copiedKey === v.key ? "mini-btn ghost success" : "mini-btn ghost"} type="button" onClick={() => copyText(v.key)}>
-                                {copiedKey === v.key ? <Check size={14} /> : <Copy size={14} />}
-                                <span>{copiedKey === v.key ? t("copied") : t("copyKey")}</span>
+                              <button className="mini-btn" type="button" onClick={() => void saveInlineEnvVar(null, editingKey, editingValue)}>
+                                <Check size={14} />
+                                <span>{t("save")}</span>
                               </button>
                               <button
-                                className={copiedKey === v.value ? "mini-btn ghost success" : "mini-btn ghost"}
+                                className="mini-btn ghost"
                                 type="button"
-                                onClick={() => copyText(v.value)}
-                                disabled={!showValues}
+                                onClick={() => {
+                                  setEditingEnvKey(null);
+                                  setEditingKey("");
+                                  setEditingValue("");
+                                }}
                               >
-                                {copiedKey === v.value ? <Check size={14} /> : <Copy size={14} />}
-                                <span>{copiedKey === v.value ? t("copied") : t("copyValue")}</span>
+                                <span>{t("cancel")}</span>
                               </button>
+                            </div>
+                          </div>
+                        ) : null}
+
+                        {selectedGroupVars.slice(0, 500).map((v) => (
+                          <div key={v.key} className={editingEnvKey === v.key ? "env-item is-editing" : "env-item"} role="listitem">
+                            <div className="env-key" title={v.key}>
+                              {editingEnvKey === v.key ? (
+                                <input
+                                  className="env-edit-input mono"
+                                  value={editingKey}
+                                  onChange={(e) => setEditingKey(e.currentTarget.value)}
+                                  autoFocus
+                                />
+                              ) : (
+                                <span className="env-key-text">{v.key}</span>
+                              )}
+                            </div>
+                            <div className="env-value" title={showValues ? v.value : ""}>
+                              {editingEnvKey === v.key ? (
+                                <input
+                                  className="env-edit-input mono"
+                                  value={editingValue}
+                                  onChange={(e) => setEditingValue(e.currentTarget.value)}
+                                />
+                              ) : showValues ? (
+                                v.value
+                              ) : (
+                                "••••••"
+                              )}
+                            </div>
+                            <div className="env-actions">
+                              {editingEnvKey === v.key ? (
+                                <>
+                                  <button className="mini-btn" type="button" onClick={() => void saveInlineEnvVar(v.key, editingKey, editingValue)}>
+                                    <Check size={14} />
+                                    <span>{t("save")}</span>
+                                  </button>
+                                  <button
+                                    className="mini-btn ghost"
+                                    type="button"
+                                    onClick={() => {
+                                      setEditingEnvKey(null);
+                                      setEditingKey("");
+                                      setEditingValue("");
+                                    }}
+                                  >
+                                    <span>{t("cancel")}</span>
+                                  </button>
+                                </>
+                              ) : (
+                                <>
+                                  <button
+                                    className="mini-btn ghost"
+                                    type="button"
+                                    onClick={() => {
+                                      setEditingEnvKey(v.key);
+                                      setEditingKey(v.key);
+                                      setEditingValue(v.value);
+                                    }}
+                                  >
+                                    <Pencil size={14} />
+                                    <span>{t("edit")}</span>
+                                  </button>
+                                  <button className={copiedKey === v.key ? "mini-btn ghost success" : "mini-btn ghost"} type="button" onClick={() => copyText(v.key)}>
+                                    {copiedKey === v.key ? <Check size={14} /> : <Copy size={14} />}
+                                    <span>{copiedKey === v.key ? t("copied") : t("copyKey")}</span>
+                                  </button>
+                                  <button
+                                    className={copiedKey === v.value ? "mini-btn ghost success" : "mini-btn ghost"}
+                                    type="button"
+                                    onClick={() => copyText(v.value)}
+                                    disabled={!showValues}
+                                  >
+                                    {copiedKey === v.value ? <Check size={14} /> : <Copy size={14} />}
+                                    <span>{copiedKey === v.value ? t("copied") : t("copyValue")}</span>
+                                  </button>
+                                  <button className="mini-btn ghost danger" type="button" onClick={() => void deleteInlineEnvVar(v.key)}>
+                                    <Trash2 size={14} />
+                                    <span>{t("delete")}</span>
+                                  </button>
+                                </>
+                              )}
                             </div>
                           </div>
                         ))}
