@@ -613,7 +613,6 @@ function App() {
                 }
           }
         />
-        {isMac ? null : <WindowControls />}
         <div className="popover-wrap">
           <button
             className="icon-only ghost"
@@ -627,6 +626,7 @@ function App() {
             <SettingsIcon size={18} />
           </button>
         </div>
+        {isMac ? null : <WindowControls />}
       </header>
 
       {settingsOpen
