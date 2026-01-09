@@ -6,6 +6,7 @@ import React, { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import "./App.css";
+import { EvLogo } from "./components/EvLogo";
 import { Modal } from "./components/Modal";
 import { Select } from "./components/Select";
 import { WindowControls } from "./components/WindowControls";
@@ -704,9 +705,18 @@ function App() {
   return (
     <div className="app">
       <header className="topbar" data-tauri-drag-region>
-        <div className="topbar-title" aria-label={t("appName")}>
-          {t("appName")}
-        </div>
+        {isMac ? (
+          <div className="topbar-title" aria-label={t("appName")}>
+            {t("appName")}
+          </div>
+        ) : (
+          <div className="brand" aria-label={t("appName")}>
+            <span className="brand-mark" aria-hidden="true">
+              <EvLogo size={18} title={t("appName")} />
+            </span>
+            <span className="brand-name">{t("appName")}</span>
+          </div>
+        )}
 
         <div
           className="topbar-spacer"
