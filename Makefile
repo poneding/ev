@@ -69,7 +69,7 @@ release:
 	  if git rev-parse -q --verify "refs/tags/$$tag" >/dev/null 2>&1; then \
 	    echo ">> tag $$tag already exists; skipping tag creation"; \
 	  else \
-	    git tag "$$tag"; \
+	    git tag "$$tag" && git push origin "$$tag"; \
 	  fi; \
 	  echo ">> done: committed and tagged $$tag"
 
